@@ -45,14 +45,19 @@ warn() {
 confirm() {
   prompt="$1"
 
-  if [ ! -t 0 ]; then
+  if [ ! -t 1 ] || [ ! -r /dev/tty ]; then
     info "$prompt [y/N] n"
-    info "Non-interactive mode detected; skipping change"
+    info "No interactive terminal detected; skipping change"
     return 1
   fi
 
-  printf '%s [y/N] ' "$prompt"
-  IFS= read -r answer || answer=""
+  printf '%s [y/N] ' "$prompt" > /dev/tty
+
+  if IFS= read -r answer < /dev/tty; then
+    :
+  else
+    answer=""
+  fi
 
   case "$answer" in
     y|Y|yes|YES|Yes)
