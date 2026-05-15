@@ -12,6 +12,28 @@ MIN_NPM_PATCH=0
 NPMRC=
 BUNFIG=
 
+BUN_MINIMUM_RELEASE_AGE_EXCLUDES='@gm/event-hub
+@gm/styles
+@gm/ui-components
+@gm/gm-api-clients-base
+@gm/gm-asset-hierachy-api-client
+@gm/gm-businessrelations-api-client
+@gm/gm-cloud-components
+@gm/gm-cloud-e2e-test-base
+@gm/gm-cloud-events
+@gm/gm-cloud-tenant
+@gm/gm-cloud-tenant-tanstack
+@gm/gm-cloud-tenant-wouter
+@gm/gm-cloud-theme
+@gm/gm-coding-conventions
+@gm/gm-component-library
+@gm/gm-energy-api-client
+@gm/gm-kendo-intl
+@gm/gm-notifications-api-client
+@gm/gm-tasks-api-client
+@gm/gm-usermanagement-api-client
+@gm/gm-utils'
+
 info() {
   printf '%s\n' "$*"
 }
@@ -88,6 +110,49 @@ version_lt() {
   return 1
 }
 
+toml_array_from_lines() {
+  first=1
+  printf '['
+
+  printf '%s\n' "$BUN_MINIMUM_RELEASE_AGE_EXCLUDES" | while IFS= read -r package_name; do
+    [ -n "$package_name" ] || continue
+
+    escaped="$(printf '%s' "$package_name" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+
+    if [ "$first" -eq 1 ]; then
+      first=0
+    else
+      printf ', '
+    fi
+
+    printf '"%s"' "$escaped"
+  done
+
+  printf ']'
+}
+
+bunfig_has_install_key() {
+  key="$1"
+
+  awk -v key="$key" '
+    /^[[:space:]]*\[/ {
+      in_install = ($0 ~ /^[[:space:]]*\[install\][[:space:]]*$/)
+    }
+
+    in_install {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      if (line ~ "^" key "[[:space:]]*=") {
+        found = 1
+      }
+    }
+
+    END {
+      exit found ? 0 : 1
+    }
+  ' "$BUNFIG"
+}
+
 check_npm_version() {
   if ! command -v npm >/dev/null 2>&1; then
     info "npm is not installed; skipping npm version check"
@@ -124,6 +189,7 @@ check_npmrc_min_release_age() {
       else
         info "Suggestion: add this to $NPMRC:"
       fi
+
       info "min-release-age=3"
 
       if confirm "Apply this change?"; then
@@ -135,11 +201,13 @@ check_npmrc_min_release_age() {
     fi
   else
     info "$NPMRC does not exist."
+
     if [ "$npm_min_release_age_supported" -eq 0 ]; then
       info "You can create ~/.npmrc now, but update npm before relying on it:"
     else
       info "If you ever use npm, consider adding this to ~/.npmrc:"
     fi
+
     info "min-release-age=3"
 
     if confirm "Create $NPMRC with this setting?"; then
@@ -151,31 +219,21 @@ check_npmrc_min_release_age() {
   fi
 }
 
-bunfig_has_install_minimum_release_age() {
-  awk '
-    /^[[:space:]]*\[/ {
-      in_install = ($0 ~ /^[[:space:]]*\[install\][[:space:]]*$/)
-    }
-    in_install && /^[[:space:]]*minimumReleaseAge[[:space:]]*=/ {
-      found = 1
-    }
-    END {
-      exit found ? 0 : 1
-    }
-  ' "$BUNFIG"
-}
-
 check_bunfig_minimum_release_age() {
+  exclude_line="minimumReleaseAgeExcludes = $(toml_array_from_lines)"
+
   if [ ! -f "$BUNFIG" ]; then
     info "$BUNFIG does not exist."
     info "Suggestion: create it with:"
     info "[install]"
     info "minimumReleaseAge = 259200"
+    info "$exclude_line"
 
     if confirm "Create $BUNFIG with this setting?"; then
       {
         printf '[install]\n'
         printf 'minimumReleaseAge = 259200\n'
+        printf '%s\n' "$exclude_line"
       } > "$BUNFIG"
       info "Created $BUNFIG"
     else
@@ -185,57 +243,81 @@ check_bunfig_minimum_release_age() {
     return 0
   fi
 
-  if bunfig_has_install_minimum_release_age; then
-    info "bunfig.toml already contains minimumReleaseAge under [install]"
+  has_minimum_release_age=0
+  has_minimum_release_age_excludes=0
+
+  if bunfig_has_install_key minimumReleaseAge; then
+    has_minimum_release_age=1
+  fi
+
+  if bunfig_has_install_key minimumReleaseAgeExcludes; then
+    has_minimum_release_age_excludes=1
+  fi
+
+  if [ "$has_minimum_release_age" -eq 1 ] && [ "$has_minimum_release_age_excludes" -eq 1 ]; then
+    info "bunfig.toml already contains minimumReleaseAge and minimumReleaseAgeExcludes under [install]"
     return 0
   fi
 
-  info "Suggestion: add this to $BUNFIG:"
-  info "[install]"
-  info "minimumReleaseAge = 259200"
+  info "Suggestion: ensure $BUNFIG contains this under [install]:"
+
+  if [ "$has_minimum_release_age" -eq 0 ]; then
+    info "minimumReleaseAge = 259200"
+  fi
+
+  if [ "$has_minimum_release_age_excludes" -eq 0 ]; then
+    info "$exclude_line"
+  fi
 
   if ! confirm "Apply this change?"; then
     info "Skipped bunfig change"
     return 0
   fi
 
+  tmp_file="${BUNFIG}.tmp.$$"
+
   if grep -Eq '^[[:space:]]*\[install\][[:space:]]*$' "$BUNFIG"; then
-    if ! command -v ed >/dev/null 2>&1; then
-      warn "Cannot update $BUNFIG directly: ed is not installed."
-      return 1
-    fi
+    awk \
+      -v has_min="$has_minimum_release_age" \
+      -v has_excludes="$has_minimum_release_age_excludes" \
+      -v exclude_line="$exclude_line" '
+      {
+        print $0
 
-    install_line="$(
-      awk '
-      /^[[:space:]]*\[install\][[:space:]]*$/ && !done {
-        print NR
-        exit
+        if (!inserted && $0 ~ /^[[:space:]]*\[install\][[:space:]]*$/) {
+          if (has_min == 0) {
+            print "minimumReleaseAge = 259200"
+          }
+
+          if (has_excludes == 0) {
+            print exclude_line
+          }
+
+          inserted = 1
+        }
       }
-    ' "$BUNFIG"
-    )"
-
-    if [ -z "$install_line" ]; then
-      warn "Could not locate [install] in $BUNFIG"
-      return 1
-    fi
-
-    if ! printf '%s\n' \
-      "${install_line}a" \
-      'minimumReleaseAge = 259200' \
-      '.' \
-      'w' \
-      'q' | ed -s "$BUNFIG" >/dev/null; then
+    ' "$BUNFIG" > "$tmp_file" || {
+      rm -f "$tmp_file"
       warn "Failed to update $BUNFIG"
       return 1
-    fi
+    }
+
+    mv "$tmp_file" "$BUNFIG"
   else
     {
       printf '\n[install]\n'
-      printf 'minimumReleaseAge = 259200\n'
+
+      if [ "$has_minimum_release_age" -eq 0 ]; then
+        printf 'minimumReleaseAge = 259200\n'
+      fi
+
+      if [ "$has_minimum_release_age_excludes" -eq 0 ]; then
+        printf '%s\n' "$exclude_line"
+      fi
     } >> "$BUNFIG"
   fi
 
-  info "Added Bun minimumReleaseAge to $BUNFIG"
+  info "Updated Bun minimumReleaseAge settings in $BUNFIG"
 }
 
 check_bun() {
